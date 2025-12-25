@@ -1,98 +1,58 @@
 const nodemailer = require('nodemailer');
 
-// Create multiple transporter configurations for fallback
-const createTransporter = () => {
-     // Primary configuration with Gmail service
-     const primaryConfig = {
-          service: 'gmail',
-          auth: {
-               user: process.env.EMAIL,
-               pass: process.env.EMAIL_PASSWORD 
-          },
-          tls: {
-               rejectUnauthorized: false
-          },
-          connectionTimeout: 20000,   // 20 seconds
-          greetingTimeout: 10000,     // 10 seconds  
-          socketTimeout: 20000,       // 20 seconds
-     };
+// Create transporter with fallback configuration
+const transporter = nodemailer.createTransport({
+     service: 'gmail',  // Use service instead of manual host config
+     auth: {
+          user: process.env.EMAIL,
+          pass: process.env.EMAIL_PASSWORD 
+     },
+     tls: {
+          rejectUnauthorized: false
+     },
+     connectionTimeout: 30000,   // Reduce to 30 seconds
+     greetingTimeout: 15000,     // Reduce to 15 seconds  
+     socketTimeout: 30000,       // Reduce to 30 seconds
+     pool: true,                 // Use connection pooling
+     maxConnections: 1,          // Limit connections
+     rateDelta: 1000,            // Rate limiting
+     rateLimit: 3                // Max 3 emails per second
+});
 
-     // Fallback configuration with direct SMTP
-     const fallbackConfig = {
-          host: 'smtp.gmail.com',
-          port: 465,
-          secure: true,
-          auth: {
-               user: process.env.EMAIL,
-               pass: process.env.EMAIL_PASSWORD 
-          },
-          tls: {
-               rejectUnauthorized: false
-          },
-          connectionTimeout: 15000,
-          greetingTimeout: 8000,
-          socketTimeout: 15000,
-     };
-
-     return {
-          primary: nodemailer.createTransport(primaryConfig),
-          fallback: nodemailer.createTransport(fallbackConfig)
-     };
-};
-
-const transporters = createTransporter();
-
-// Verify transporter with fallback
+// Verify transporter on startup
 const verifyTransporter = async () => {
-     console.log('🔧 Testing SMTP connections...');
-     console.log('📧 Email credentials:', {
-          user: process.env.EMAIL ? '✅ Configured' : '❌ Missing',
-          pass: process.env.EMAIL_PASSWORD ? '✅ Configured' : '❌ Missing'
-     });
-     
-     // Try primary transporter first
      try {
-          console.log('🔄 Testing primary Gmail service...');
-          await transporters.primary.verify();
-          console.log('✅ Primary SMTP connection successful');
-          return 'primary';
-     } catch (primaryError) {
-          console.log('⚠️ Primary connection failed, trying fallback...');
+          console.log('🔧 Testing SMTP connection...');
+          console.log('📧 Email credentials:', {
+               user: process.env.EMAIL ? '✅ Configured' : '❌ Missing',
+               pass: process.env.EMAIL_PASSWORD ? '✅ Configured' : '❌ Missing'
+          });
           
-          // Try fallback transporter
-          try {
-               console.log('🔄 Testing fallback SMTP...');
-               await transporters.fallback.verify();
-               console.log('✅ Fallback SMTP connection successful');
-               return 'fallback';
-          } catch (fallbackError) {
-               console.error('❌ All SMTP connections failed');
-               console.error('Primary error:', primaryError.message);
-               console.error('Fallback error:', fallbackError.message);
-               return false;
-          }
+          await transporter.verify();
+          console.log('✅ SMTP Server connection verified successfully');
+          return true;
+     } catch (error) {
+          console.error('❌ SMTP Connection failed:', error.message);
+          console.error('❌ Error code:', error.code);
+          console.error('❌ Please check:');
+          console.error('   1. EMAIL environment variable is set');
+          console.error('   2. EMAIL_PASSWORD is a valid Gmail App Password (not regular password)');
+          console.error('   3. 2-Factor Authentication is enabled on Gmail');
+          console.error('   4. App Password is generated from Gmail Security settings');
+          return false;
      }
 };
 
-// Initialize verification with timeout
-let verificationResult = null;
-setTimeout(async () => {
-     verificationResult = await verifyTransporter();
-}, 2000);
+// Initialize verification
+verifyTransporter();
 
 async function sendMail(to, subject, otp) {
     return new Promise(async (resolve, reject) => {
         try {
-            console.log('📧 Attempting to send email to:', to);
-            
-            // Skip verification if it's taking too long and try direct sending
-            let activeTransporter = transporters.primary;
-            
-            if (verificationResult === 'fallback') {
-                activeTransporter = transporters.fallback;
-                console.log('🔄 Using fallback transporter');
-            } else if (verificationResult === false) {
-                console.log('⚠️ Verification failed, trying anyway with primary...');
+            // Verify connection before sending
+            const isVerified = await verifyTransporter();
+            if (!isVerified) {
+                throw new Error('SMTP server not ready');
             }
 
             const mailOptions = {
@@ -145,30 +105,25 @@ async function sendMail(to, subject, otp) {
             `
             };
             
-            // Try primary first, then fallback
-            try {
-                const info = await activeTransporter.sendMail(mailOptions);
-                console.log("✅ Email sent successfully via", verificationResult || 'primary');
-                console.log("📧 Message ID:", info.messageId);
-                resolve(info);
-            } catch (primaryError) {
-                if (activeTransporter === transporters.primary) {
-                    console.log("⚠️ Primary failed, trying fallback...");
-                    try {
-                        const info = await transporters.fallback.sendMail(mailOptions);
-                        console.log("✅ Email sent successfully via fallback");
-                        resolve(info);
-                    } catch (fallbackError) {
-                        console.error("❌ All transporters failed");
-                        reject(fallbackError);
-                    }
-                } else {
-                    reject(primaryError);
-                }
-            }
+            console.log('📧 Attempting to send email to:', to);
+            console.log('🔧 SMTP Config:', {
+                host: 'smtp.gmail.com',
+                port: 587,
+                secure: false,
+                user: process.env.EMAIL ? 'Configured' : 'Missing',
+                pass: process.env.EMAIL_PASSWORD ? 'Configured' : 'Missing'
+            });
+            
+            // Send with timeout
+            const info = await transporter.sendMail(mailOptions);
+            console.log("✅ Email sent successfully:", info.response);
+            console.log("📧 Message ID:", info.messageId);
+            resolve(info);
             
         } catch (error) {
             console.error("❌ Email sending failed:", error.message);
+            console.error("❌ Error code:", error.code);
+            console.error("❌ Error details:", error);
             reject(error);
         }
     });
@@ -177,5 +132,5 @@ async function sendMail(to, subject, otp) {
 module.exports = {
     sendMail,
     verifyTransporter,
-    transporters
+    transporter
 };
